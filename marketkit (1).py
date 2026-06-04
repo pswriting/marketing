@@ -1,25 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-MarketKit v3 — 전자책 → 전 채널 마케팅 통합기
+MarketKit v2 — 전자책 → 전 채널 마케팅 통합기
 CashMaker 브랜드 / Writey 자매 제품
 
-v3 변경점
-  · 안정성: API 키 형식 검증 + 지수 백오프 재시도 + 오류 유형별 친절한 메시지
-  · 품질  : 프롬프트 정교화, 카드뉴스 이미지 '병렬' 생성(빠르고 일관성↑), 전체 ZIP 저장
-  · UI    : 과감한 미니멀 — 군더더기 제거, 한 화면 한 동작
-  · 디자인: 다크 + 골드 전문가급 디자인 시스템
+흐름:
+  0. 전자책 업로드 → 내용 자동 분석
+  1. 블로그 주제 추천(클릭 시 본문 칸 자동입력) → 본문 생성 (몰입형)
+  2. SNS 변환 (블로그 결과 자동 반영, 카드뉴스는 이미지로 생성)
+  3. 크몽 서비스 등록 자료 (제목 25자·가격 추천 포함)
+  4. 상세페이지 = 디자인된 이미지 + 설득형 상품설명 2000자 (전자책 기반 자동)
 
 이미지: Google Gemini Nano Banana Pro (gemini-3-pro-image-preview)
 텍스트: Claude Sonnet 4.5
 """
 import os
-import time
 import logging
 import json
 import html
 import io
-import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import base64
 
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 logging.getLogger('anthropic').setLevel(logging.ERROR)
@@ -33,6 +32,7 @@ try:
 except ImportError:
     CLAUDE_AVAILABLE = False
 
+# Gemini 이미지 생성 (새 SDK)
 try:
     from google import genai as google_genai
     from google.genai import types as genai_types
@@ -62,241 +62,170 @@ except ImportError:
 CORRECT_PASSWORD = "cashmaker2024"
 CLAUDE_MODEL = "claude-sonnet-4-5"
 IMAGE_MODEL = "gemini-3-pro-image-preview"   # Nano Banana Pro
-MAX_RETRIES = 3
-IMG_WORKERS = 4   # 카드뉴스 병렬 생성 워커 수
 
 st.set_page_config(page_title="MarketKit", layout="wide", page_icon="📣")
 
 # ==========================================
-# STYLE — 다크 + 골드 전문가급 디자인 시스템
+# STYLE
 # ==========================================
 st.markdown("""
 <style>
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
 :root {
-    --gold:#C9A24B; --gold-light:#E6CC84; --teal:#4BB7A8; --teal-deep:#2E8276;
-    --bg:#0A0A0C; --bg2:#0E0E11;
-    --card:rgba(255,255,255,.025); --card2:rgba(255,255,255,.05);
-    --text:#F6F4F0; --text2:#8B8884; --text3:#5E5C58;
-    --line:rgba(201,162,75,.16); --line2:rgba(255,255,255,.06);
-    --radius:14px;
+    --gold:#C9A24B; --gold-light:#E0C074; --teal:#4BB7A8; --dark:#0B0B0D;
+    --card:rgba(255,255,255,0.03); --card2:rgba(255,255,255,0.06);
+    --text:#F5F3EF; --text2:#908D86; --line:rgba(201,162,75,0.18);
 }
-* { font-family:'Pretendard',-apple-system,BlinkMacSystemFont,sans-serif !important; }
-html, body { -webkit-font-smoothing:antialiased; }
+* { font-family:'Pretendard',-apple-system,sans-serif !important; }
 .stApp {
     background:
-        radial-gradient(900px 500px at 12% -5%, rgba(75,183,168,.05) 0%, transparent 55%),
-        radial-gradient(900px 600px at 92% 105%, rgba(201,162,75,.045) 0%, transparent 55%),
-        linear-gradient(180deg,#0A0A0C 0%,#08080A 50%,#0A0A0C 100%) !important;
+        radial-gradient(ellipse at 18% 0%, rgba(75,183,168,0.06) 0%, transparent 52%),
+        radial-gradient(ellipse at 82% 100%, rgba(201,162,75,0.05) 0%, transparent 52%),
+        linear-gradient(180deg,#0B0B0D 0%,#08080A 50%,#0B0B0D 100%) !important;
     background-attachment:fixed;
 }
-.main .block-container { max-width:920px; padding:2rem 2rem 4rem; }
+.main .block-container { max-width:1080px; padding:2.5rem 2rem; }
 .stDeployButton, footer, #MainMenu { display:none !important; }
 header[data-testid="stHeader"] { background:transparent !important; }
 
-/* 타이포 스케일 */
-h1,h2,h3,h4 { color:var(--text) !important; letter-spacing:-.2px; }
-h1 { font-size:30px !important; font-weight:800 !important; }
-h2 { font-size:21px !important; font-weight:700 !important; }
-h3 { font-size:15px !important; color:var(--text2) !important; font-weight:600 !important;
-     text-transform:uppercase; letter-spacing:1.5px !important; margin-top:.5rem !important; }
-h4 { font-size:16px !important; font-weight:700 !important; }
-p,span,label,div,li { color:var(--text); font-size:15.5px; line-height:1.7; }
-.stCaption, [data-testid="stCaptionContainer"] { color:var(--text2) !important; }
-hr { border-color:var(--line2) !important; margin:1.6rem 0 !important; }
+h1,h2,h3 { color:var(--text) !important; letter-spacing:.3px; }
+h1 { font-size:32px !important; font-weight:800 !important; }
+h2 { font-size:23px !important; font-weight:700 !important; }
+h3 { font-size:18px !important; color:var(--gold) !important; font-weight:600 !important; }
+p,span,label,div,li { color:var(--text); font-size:16px; line-height:1.7; }
 
-/* 버튼 — primary는 골드, 보조는 외곽선 */
 .stButton > button {
-    background:linear-gradient(135deg,var(--gold-light),var(--gold)) !important;
-    color:#0A0A0C !important; -webkit-text-fill-color:#0A0A0C !important;
+    background:linear-gradient(135deg,#E0C074,#C9A24B) !important;
+    color:#0B0B0D !important; -webkit-text-fill-color:#0B0B0D !important;
     border:none !important; border-radius:12px; font-weight:700; font-size:15px !important;
-    padding:12px 26px; transition:transform .18s ease, box-shadow .18s ease;
-    box-shadow:0 4px 16px rgba(201,162,75,.18);
+    padding:13px 30px; transition:all .3s ease; box-shadow:0 6px 20px rgba(201,162,75,.22);
 }
-.stButton > button * { color:#0A0A0C !important; -webkit-text-fill-color:#0A0A0C !important; }
-.stButton > button:hover { box-shadow:0 8px 26px rgba(201,162,75,.34); transform:translateY(-1px); }
-.stButton > button:active { transform:translateY(0); }
-.stDownloadButton > button {
-    background:transparent !important; color:var(--gold) !important; -webkit-text-fill-color:var(--gold) !important;
-    border:1px solid var(--line) !important; border-radius:11px; font-weight:600; box-shadow:none !important;
-}
-.stDownloadButton > button:hover { border-color:var(--gold) !important; background:rgba(201,162,75,.06) !important; }
+.stButton > button * { color:#0B0B0D !important; -webkit-text-fill-color:#0B0B0D !important; }
+.stButton > button:hover { box-shadow:0 10px 32px rgba(201,162,75,.4); transform:translateY(-2px); }
 
-/* 입력 — 흰 배경 + 검은 글씨 */
+/* 입력 필드 — 흰 배경 + 검은 글씨 + 검은 placeholder/도움말 */
 .stTextInput input, .stTextArea textarea {
-    background:#fff !important; border:1px solid var(--line) !important; border-radius:11px !important;
-    color:#111 !important; -webkit-text-fill-color:#111 !important; padding:14px !important; font-size:15.5px !important;
+    background:#fff !important; border:.5px solid var(--line) !important; border-radius:10px !important;
+    color:#111 !important; -webkit-text-fill-color:#111 !important; padding:15px !important; font-size:16px !important;
 }
 .stTextInput input::placeholder, .stTextArea textarea::placeholder {
-    color:#9a9a9a !important; -webkit-text-fill-color:#9a9a9a !important;
+    color:#888 !important; -webkit-text-fill-color:#888 !important;
 }
 .stTextInput input:focus, .stTextArea textarea:focus {
-    border-color:var(--teal) !important; box-shadow:0 0 0 3px rgba(75,183,168,.16) !important;
+    border-color:var(--teal) !important; box-shadow:0 0 0 2px rgba(75,183,168,.2) !important;
 }
-.stSelectbox div[data-baseweb="select"] > div, .stMultiSelect div[data-baseweb="select"] > div {
-    background:#fff !important; border:1px solid var(--line) !important; border-radius:11px !important;
+
+/* 셀렉트박스 — 흰 배경 + 검은 글씨 */
+.stSelectbox div[data-baseweb="select"] > div {
+    background:#fff !important; border:.5px solid var(--line) !important; border-radius:10px !important;
 }
-.stSelectbox div[data-baseweb="select"] span, .stSelectbox div[data-baseweb="select"] div {
+.stSelectbox div[data-baseweb="select"] span,
+.stSelectbox div[data-baseweb="select"] div {
     color:#111 !important; -webkit-text-fill-color:#111 !important;
 }
+/* 드롭다운 펼침 목록 */
 div[data-baseweb="popover"] li, ul[role="listbox"] li {
     color:#111 !important; -webkit-text-fill-color:#111 !important; background:#fff !important;
 }
-.stMultiSelect span[data-baseweb="tag"] { background:var(--gold) !important; }
-.stMultiSelect span[data-baseweb="tag"] span { color:#0A0A0C !important; -webkit-text-fill-color:#0A0A0C !important; }
+/* 멀티셀렉트 선택 태그 — 골드 배경 + 검은 글씨 */
+.stMultiSelect div[data-baseweb="select"] > div {
+    background:#fff !important; border:.5px solid var(--line) !important; border-radius:10px !important;
+}
+.stMultiSelect span[data-baseweb="tag"] {
+    background:#C9A24B !important;
+}
+.stMultiSelect span[data-baseweb="tag"] span {
+    color:#0B0B0D !important; -webkit-text-fill-color:#0B0B0D !important;
+}
 .stMultiSelect div[data-baseweb="select"] input { color:#111 !important; -webkit-text-fill-color:#111 !important; }
-.stSlider [data-baseweb="slider"] div[role="slider"] { background:var(--gold) !important; }
 
-/* 탭 — 미니멀 */
-.stTabs [data-baseweb="tab-list"] { gap:2px; border-bottom:1px solid var(--line2); flex-wrap:wrap; }
-.stTabs [data-baseweb="tab"] {
-    background:transparent; color:var(--text2) !important; border-radius:10px 10px 0 0;
-    padding:10px 16px; font-weight:600; font-size:14.5px;
-}
+.stTabs [data-baseweb="tab-list"] { gap:4px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+.stTabs [data-baseweb="tab"] { background:transparent; color:var(--text2) !important; border-radius:10px 10px 0 0; padding:11px 18px; font-weight:600; }
 .stTabs [aria-selected="true"] {
-    color:var(--gold) !important; border-bottom:2px solid var(--gold);
+    background:linear-gradient(135deg,rgba(75,183,168,.18),rgba(201,162,75,.10)) !important;
+    color:var(--gold) !important; border-bottom:2px solid var(--teal);
 }
 
-/* 카드/박스 */
-.result-box { background:var(--card) !important; border:1px solid var(--line2); border-left:2px solid var(--teal);
-    border-radius:var(--radius); padding:20px 24px; margin:14px 0; }
-.hero { padding:10px 0 22px; }
-.hero .badge { display:inline-block; color:var(--teal); border:1px solid rgba(75,183,168,.4);
-    border-radius:20px; padding:4px 14px; font-size:11px; letter-spacing:2.5px; margin-bottom:14px; }
-.ctx-pill { display:inline-block; background:var(--card2); border:1px solid var(--line);
-    border-radius:20px; padding:5px 14px; font-size:12.5px; color:var(--teal); margin-bottom:6px; }
-.step-tag { display:inline-block; color:var(--gold); font-size:12px; font-weight:700;
-    letter-spacing:2px; margin-bottom:2px; }
-.footer { text-align:center; padding:26px 20px; margin-top:48px; border-top:1px solid var(--line2);
-    color:var(--text2); font-size:13px; letter-spacing:1.5px; }
+.result-box { background:var(--card) !important; border:.5px solid var(--line); border-left:3px solid var(--teal); border-radius:12px; padding:22px 26px; margin:16px 0; }
+.hero { text-align:center; padding:6px 0 26px; }
+.hero .badge { display:inline-block; color:var(--teal); border:1px solid var(--teal); border-radius:20px; padding:5px 16px; font-size:12px; letter-spacing:2px; margin-bottom:12px; }
+.ctx-pill { display:inline-block; background:var(--card2); border:.5px solid var(--line); border-radius:20px; padding:6px 16px; font-size:13px; color:var(--teal); margin-bottom:8px; }
+.footer { text-align:center; padding:30px 20px; margin-top:50px; border-top:1px solid var(--line); color:#fff; font-size:14px; letter-spacing:2px; }
 
-/* 로그인 */
-.login-wrap { max-width:400px; margin:9vh auto 0; text-align:center; }
-.login-card { background:var(--card2); border:1px solid var(--line); border-radius:20px;
-    padding:46px 38px; box-shadow:0 24px 70px rgba(0,0,0,.5); }
-.login-card h1 { font-size:28px !important; margin-bottom:6px; }
-.login-card .sub { color:var(--text2); font-size:14.5px; margin-bottom:26px; }
-
-/* 알림 톤 다운 */
-.stAlert { border-radius:12px !important; }
-[data-testid="stProgress"] > div > div { background:linear-gradient(90deg,var(--teal),var(--gold)) !important; }
+/* 전체화면 로그인 */
+.login-wrap { max-width:420px; margin:8vh auto 0; text-align:center; }
+.login-card {
+    background:var(--card2); border:.5px solid var(--line); border-radius:20px;
+    padding:48px 40px; box-shadow:0 20px 60px rgba(0,0,0,.4);
+}
+.login-card h1 { font-size:30px !important; margin-bottom:6px; }
+.login-card .sub { color:var(--text2); font-size:15px; margin-bottom:28px; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ==========================================
-# 안정성 레이어 — 키 검증 / 재시도 / 오류처리
+# Claude / Gemini 호출 + 유틸
 # ==========================================
-def validate_claude_key(key):
-    if not key:
-        return False, "Claude API 키를 입력해주세요."
-    if not key.startswith("sk-ant-"):
-        return False, "Claude 키 형식이 올바르지 않아요. (sk-ant- 로 시작해야 해요)"
-    return True, ""
-
-
-def validate_gemini_key(key):
-    if not key:
-        return False, "Google API 키를 입력해주세요."
-    if not key.startswith("AIza"):
-        return False, "Google 키 형식이 올바르지 않아요. (AIza 로 시작해야 해요)"
-    return True, ""
-
-
-def _friendly_error(e):
-    """예외를 사용자가 알아볼 수 있는 메시지로."""
-    s = str(e).lower()
-    if "401" in s or "authentication" in s or "invalid x-api-key" in s or "api key" in s:
-        return "API 키가 거부됐어요. 키가 정확한지, 결제가 활성화돼 있는지 확인해주세요."
-    if "429" in s or "rate" in s or "overloaded" in s:
-        return "요청이 몰려 잠시 거절됐어요. 30초쯤 뒤에 다시 시도해주세요."
-    if "529" in s:
-        return "서버가 잠시 과부하 상태예요. 잠시 후 다시 시도해주세요."
-    if "timeout" in s or "timed out" in s:
-        return "응답이 지연됐어요. 네트워크를 확인하고 다시 시도해주세요."
-    if "connection" in s or "network" in s:
-        return "네트워크 연결을 확인해주세요."
-    return f"오류: {str(e)[:140]}"
-
-
-def _should_retry(e):
-    s = str(e).lower()
-    return any(k in s for k in ["429", "529", "overloaded", "timeout", "timed out", "connection", "rate"])
-
-
 def ask_ai(prompt, temperature=0.8, max_tokens=4000):
-    """Claude 호출. 일시적 오류는 지수 백오프로 재시도."""
     api_key = st.session_state.get('api_key', '')
-    ok, msg = validate_claude_key(api_key)
-    if not ok:
-        st.error(msg)
+    if not api_key:
+        st.error("사이드바에 Claude API 키를 먼저 입력해주세요.")
         return None
     if not CLAUDE_AVAILABLE:
-        st.error("anthropic 패키지가 없습니다. requirements.txt를 확인해주세요.")
+        st.error("anthropic 패키지가 없습니다. requirements.txt 확인 필요.")
         return None
-
-    last_err = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            client = anthropic.Anthropic(api_key=api_key)
-            resp = client.messages.create(
-                model=CLAUDE_MODEL, max_tokens=max_tokens, temperature=temperature,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return resp.content[0].text.strip()
-        except Exception as e:
-            last_err = e
-            if _should_retry(e) and attempt < MAX_RETRIES - 1:
-                time.sleep(1.5 * (2 ** attempt))
-                continue
-            break
-    st.error(f"생성 실패 — {_friendly_error(last_err)}")
-    return None
-
-
-def _gen_image_core(gkey, prompt, aspect_ratio, image_size):
-    """순수 이미지 생성(세션 미접근, 스레드 안전). (bytes, None) 또는 (None, err)."""
-    last_err = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            client = google_genai.Client(api_key=gkey)
-            try:
-                cfg = genai_types.GenerateContentConfig(
-                    response_modalities=["Image"],
-                    image_config=genai_types.ImageConfig(
-                        aspect_ratio=aspect_ratio, image_size=image_size),
-                )
-                resp = client.models.generate_content(model=IMAGE_MODEL, contents=prompt, config=cfg)
-            except Exception:
-                # 구형 SDK 폴백 (image_config 미지원)
-                resp = client.models.generate_content(model=IMAGE_MODEL, contents=prompt)
-            for part in resp.candidates[0].content.parts:
-                if getattr(part, 'inline_data', None) and part.inline_data.data:
-                    return part.inline_data.data, None
-            return None, "이미지가 반환되지 않았어요. 프롬프트를 바꿔 다시 시도해주세요."
-        except Exception as e:
-            last_err = e
-            if _should_retry(e) and attempt < MAX_RETRIES - 1:
-                time.sleep(1.5 * (2 ** attempt))
-                continue
-            break
-    return None, _friendly_error(last_err)
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=max_tokens, temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        st.error(f"생성 오류: {str(e)[:140]}")
+        return None
 
 
 def generate_image(prompt, aspect_ratio="1:1", image_size="2K"):
-    """메인 스레드용 래퍼 — 세션에서 키를 읽어 검증 후 생성."""
+    """Gemini Nano Banana Pro로 이미지 생성. 화면비·해상도 지정.
+    성공 시 (PNG bytes, None), 실패 시 (None, 에러)."""
     gkey = st.session_state.get('gemini_key', '')
-    ok, msg = validate_gemini_key(gkey)
-    if not ok:
-        return None, msg
+    if not gkey:
+        return None, "이미지 생성에는 Google(Gemini) API 키가 필요해요. 사이드바에 입력해주세요."
     if not GENAI_AVAILABLE:
-        return None, "google-genai 패키지가 없습니다. requirements.txt를 확인해주세요."
-    return _gen_image_core(gkey, prompt, aspect_ratio, image_size)
+        return None, "google-genai 패키지가 없습니다. requirements.txt 확인 필요."
+    try:
+        client = google_genai.Client(api_key=gkey)
+        cfg = genai_types.GenerateContentConfig(
+            response_modalities=["Image"],
+            image_config=genai_types.ImageConfig(
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+            ),
+        )
+        resp = client.models.generate_content(
+            model=IMAGE_MODEL,
+            contents=prompt,
+            config=cfg,
+        )
+        for part in resp.candidates[0].content.parts:
+            if getattr(part, 'inline_data', None) and part.inline_data.data:
+                return part.inline_data.data, None
+        return None, "이미지가 반환되지 않았어요. 프롬프트를 바꿔 다시 시도해주세요."
+    except Exception as e:
+        # image_config 미지원 SDK 대비 폴백
+        try:
+            client = google_genai.Client(api_key=gkey)
+            resp = client.models.generate_content(model=IMAGE_MODEL, contents=prompt)
+            for part in resp.candidates[0].content.parts:
+                if getattr(part, 'inline_data', None) and part.inline_data.data:
+                    return part.inline_data.data, None
+        except Exception as e2:
+            return None, f"이미지 생성 오류: {str(e2)[:140]}"
+        return None, f"이미지 생성 오류: {str(e)[:140]}"
 
 
-# ==========================================
-# 유틸
-# ==========================================
 def parse_json(text):
     if not text:
         return None
@@ -335,17 +264,8 @@ def extract_ebook_text(uploaded_file):
 
 
 def copy_block(text, key, height=380):
-    st.text_area("결과", value=text, height=height, key=key, label_visibility="collapsed")
+    st.text_area("결과 (전체 선택 후 복사)", value=text, height=height, key=key)
     st.caption("Ctrl+A → Ctrl+C 로 복사해서 사용하세요.")
-
-
-def zip_images(pairs, prefix="card"):
-    """[(title, bytes)] → zip bytes"""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for i, (_, data) in enumerate(pairs, 1):
-            zf.writestr(f"{prefix}_{i}.png", data)
-    return buf.getvalue()
 
 
 def ctx_summary():
@@ -367,14 +287,8 @@ def _ctx_block():
 """
 
 
-def section(step, title):
-    """미니멀 섹션 헤더."""
-    st.markdown(f'<div class="step-tag">{step}</div>', unsafe_allow_html=True)
-    st.markdown(f"#### {title}")
-
-
 # ==========================================
-# 몰입형 글쓰기 가이드
+# 몰입형 글쓰기 가이드 (강화)
 # ==========================================
 STYLE_CORE = """
 [★ 절대 원칙 — 설명문이 아니라 '몰입형 글'을 써라]
@@ -410,21 +324,21 @@ STYLE_CORE = """
 
 
 # ==========================================
-# 로그인
+# 전체화면 로그인 (피드백 3)
 # ==========================================
 def render_login():
     st.markdown('<div class="login-wrap">', unsafe_allow_html=True)
     st.markdown("""
     <div class="login-card">
-        <div style="color:#4BB7A8;font-size:12px;letter-spacing:3px;margin-bottom:10px;">CASHMAKER</div>
+        <div style="color:#4BB7A8;font-size:13px;letter-spacing:3px;margin-bottom:10px;">CASHMAKER</div>
         <h1>📣 MarketKit</h1>
         <p class="sub">전자책 하나로 블로그·SNS·크몽까지 한 번에</p>
     </div>
     """, unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        pw = st.text_input("비밀번호", type="password", key="pw_input",
-                           placeholder="비밀번호 입력", label_visibility="collapsed")
+        pw = st.text_input("비밀번호를 입력하세요", type="password", key="pw_input",
+                           placeholder="비밀번호 입력")
         if st.button("입장하기", key="login_btn", use_container_width=True):
             if pw == CORRECT_PASSWORD:
                 st.session_state['authenticated'] = True
@@ -439,60 +353,50 @@ def render_login():
 # ==========================================
 def render_sidebar():
     with st.sidebar:
-        st.markdown("### API")
+        st.markdown("### 🔑 API 설정")
 
-        st.markdown('<div style="font-size:13px;color:#C9A24B;margin-bottom:4px;">Claude 키 · 글 생성</div>', unsafe_allow_html=True)
+        # 도움말을 본문 캡션(검은 배경에 흰 글씨가 기본이라 여기선 마크다운으로) 대신
+        # 흰 입력칸 + 별도 설명 박스로. label은 사이드바라 흰색이지만 입력값은 검정.
+        st.markdown('<div style="font-size:13px;color:#C9A24B;margin-bottom:4px;">Claude API 키 (글 생성용)</div>', unsafe_allow_html=True)
         api_key = st.text_input("Claude API 키", type="password", label_visibility="collapsed",
                                 value=st.session_state.get('api_key', ''), key="api_input",
                                 placeholder="sk-ant-...")
         if api_key:
             st.session_state['api_key'] = api_key
-            ok, msg = validate_claude_key(api_key)
-            if ok:
-                st.markdown('<div style="font-size:12px;color:#4BB7A8;margin-bottom:12px;">✓ 형식 확인됨</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div style="font-size:12px;color:#E0894B;margin-bottom:12px;">{html.escape(msg)}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="font-size:12px;color:#888;margin-bottom:12px;">console.anthropic.com 에서 발급</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:12px;color:#888;margin-bottom:14px;">console.anthropic.com 에서 발급 (sk-ant- 로 시작)</div>', unsafe_allow_html=True)
 
-        st.markdown('<div style="font-size:13px;color:#C9A24B;margin-bottom:4px;">Google 키 · 이미지 (선택)</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;color:#C9A24B;margin-bottom:4px;">Google API 키 (이미지 생성용·선택)</div>', unsafe_allow_html=True)
         gkey = st.text_input("Google API 키", type="password", label_visibility="collapsed",
                              value=st.session_state.get('gemini_key', ''), key="gkey_input",
                              placeholder="AIza...")
         if gkey:
             st.session_state['gemini_key'] = gkey
-            ok, msg = validate_gemini_key(gkey)
-            if ok:
-                st.markdown('<div style="font-size:12px;color:#4BB7A8;margin-bottom:8px;">✓ 형식 확인됨</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div style="font-size:12px;color:#E0894B;margin-bottom:8px;">{html.escape(msg)}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="font-size:12px;color:#888;margin-bottom:8px;">aistudio.google.com · 카드뉴스/상세페이지용</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:12px;color:#888;margin-bottom:8px;">aistudio.google.com 에서 발급. 카드뉴스·상세페이지 이미지 생성에 사용</div>', unsafe_allow_html=True)
 
         st.markdown("---")
         a = ctx_summary()
         if a:
-            st.markdown('<div style="font-size:13px;color:#8B8884;margin-bottom:4px;">분석된 전자책</div>', unsafe_allow_html=True)
-            st.markdown(f'<div style="color:#4BB7A8;font-size:14px;margin-bottom:10px;">{html.escape(a.get("title",""))}</div>', unsafe_allow_html=True)
+            st.markdown("##### 📚 분석된 전자책")
+            st.markdown(f'<div style="color:#4BB7A8;font-size:14px;">{html.escape(a.get("title",""))}</div>', unsafe_allow_html=True)
             if st.button("전자책 비우기", key="clear_ebook", use_container_width=True):
                 for k in ['ebook_analysis', 'ebook_text', 'blog_topics', 'blog_result',
-                          'sns_result', 'kmong_result', 'detail_text', 'detail_img', 'card_imgs']:
+                          'sns_result', 'kmong_result', 'detail_text', 'detail_images']:
                     st.session_state.pop(k, None)
                 st.rerun()
         else:
-            st.markdown('<div style="font-size:13px;color:#8B8884;">① 탭에서 전자책을 올려주세요.</div>', unsafe_allow_html=True)
+            st.markdown('<div style="font-size:13px;color:#908D86;">아직 분석된 전자책이 없어요.<br>① 탭에서 업로드하세요.</div>', unsafe_allow_html=True)
 
 
 # ==========================================
 # 탭 0 — 전자책 분석
 # ==========================================
 def tab_ebook():
-    section("STEP 01", "전자책 분석")
-    st.caption("파일을 올리면 내용을 분석해, 이후 모든 콘텐츠가 이 책에 맞춰 생성됩니다.")
+    st.markdown("### 📚 전자책 분석")
+    st.caption("전자책 파일을 올리면 내용을 분석해, 이후 모든 콘텐츠가 이 책에 맞춰 생성됩니다.")
 
-    up = st.file_uploader("PDF / DOCX / TXT / MD", type=['pdf', 'docx', 'txt', 'md'], key="ebook_up")
+    up = st.file_uploader("전자책 파일 (PDF / DOCX / TXT / MD)", type=['pdf', 'docx', 'txt', 'md'], key="ebook_up")
     if up is not None and st.button("이 전자책 분석하기", key="ebook_btn", use_container_width=True):
-        with st.spinner("내용 추출 중..."):
+        with st.spinner("파일에서 내용 추출 중..."):
             text, err = extract_ebook_text(up)
         if err:
             st.error(err)
@@ -517,7 +421,7 @@ JSON만 출력:
                 data = parse_json(ask_ai(prompt, 0.5, 2000))
                 if data:
                     st.session_state['ebook_analysis'] = data
-                    st.success("분석 완료! 이제 다른 탭에서 이 책에 맞춘 콘텐츠를 만들 수 있어요.")
+                    st.success("✅ 분석 완료! 이제 다른 탭에서 이 책에 맞춘 콘텐츠를 만들 수 있어요.")
                 else:
                     st.error("분석에 실패했어요. 다시 시도해주세요.")
 
@@ -542,18 +446,19 @@ JSON만 출력:
 
 
 # ==========================================
-# 탭 1 — 블로그
+# 탭 1 — 블로그 (주제 클릭→본문칸 자동입력)
 # ==========================================
 def tab_blog():
-    section("STEP 02", "블로그")
+    st.markdown("### ✍️ 블로그 (주제 추천 → 본문)")
     a = ctx_summary()
     if a:
         st.markdown(f'<span class="ctx-pill">📚 {html.escape(a.get("title",""))} 기반</span>', unsafe_allow_html=True)
     else:
         st.caption("전자책을 먼저 분석하면 책에 맞춘 주제가 추천돼요. (없어도 직접 입력 가능)")
 
-    if st.button("블로그 주제 10개 추천받기", key="topic_btn", use_container_width=True):
-        with st.spinner("판매로 이어질 주제 뽑는 중..."):
+    st.markdown("#### 1단계 · 블로그 주제 추천")
+    if st.button("이 전자책으로 블로그 주제 10개 추천받기", key="topic_btn", use_container_width=True):
+        with st.spinner("검색에 걸리면서 전자책 판매로 이어질 주제 뽑는 중..."):
             prompt = f"""너는 네이버 블로그로 전자책을 파는 콘텐츠 전략가다.
 {_ctx_block()}
 이 전자책 판매로 이어질 블로그 글 주제 10개를 추천해라.
@@ -567,18 +472,21 @@ JSON만 출력:
             else:
                 st.error("주제 추천에 실패했어요. 다시 시도해주세요.")
 
+    # 추천 주제 — 각 주제를 버튼으로. 클릭하면 본문 주제칸에 자동 입력 (피드백 1)
     topics = st.session_state.get('blog_topics', [])
     if topics:
-        st.caption("주제를 클릭하면 아래 본문 칸에 자동 입력돼요.")
+        st.caption("👇 주제를 클릭하면 아래 본문 생성 칸에 자동으로 입력돼요.")
         for i, t in enumerate(topics):
             label = f"[{t.get('intent','')}] {t.get('title','')}"
             if st.button(label, key=f"pick_topic_{i}", use_container_width=True):
+                # 위젯 key 자체를 세팅해야 text_input에 즉시 반영된다
                 st.session_state['blog_topic'] = t.get('title', '')
                 st.rerun()
-            st.markdown(f'<div style="font-size:13px;color:#8B8884;margin:-6px 0 10px 4px;">└ {html.escape(t.get("why",""))}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="font-size:13px;color:#908D86;margin:-6px 0 10px 4px;">└ {html.escape(t.get("why",""))}</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-    topic = st.text_input("글 주제", key="blog_topic", placeholder="위에서 클릭하거나 직접 입력")
+    st.markdown("#### 2단계 · 본문 생성")
+    # value를 주지 않고 key만 사용 — 버튼이 session_state['blog_topic']를 채우면 그대로 표시됨
+    topic = st.text_input("글 주제 (위에서 클릭하면 자동 입력 / 직접 입력도 가능)", key="blog_topic")
     length = st.selectbox("글 길이", ["표준 (1500자)", "롱폼 (2500자)", "숏폼 (800자)"], key="blog_len")
 
     if st.button("블로그 본문 생성", key="blog_btn", use_container_width=True):
@@ -607,26 +515,26 @@ JSON만 출력:
         st.markdown("---")
         st.markdown("#### 📝 완성된 글")
         copy_block(st.session_state['blog_result'], key="blog_out")
-        st.download_button("글 파일로 저장 (.txt)", data=st.session_state['blog_result'].encode('utf-8'),
-                           file_name="blog.txt", mime="text/plain", use_container_width=True, key="blog_dl")
-        st.info("'SNS 변환' 탭에서 이 글이 자동 반영돼요.")
+        st.info("💡 'SNS 변환' 탭으로 가면 이 글이 자동으로 반영돼요. (다시 입력 안 해도 됨)")
 
 
 # ==========================================
-# 탭 2 — SNS 변환
+# 탭 2 — SNS 변환 (블로그 자동 반영 + 카드뉴스 이미지)
 # ==========================================
 def tab_sns():
-    section("STEP 03", "SNS 변환")
+    st.markdown("### 📱 SNS 변환")
     blog = st.session_state.get('blog_result', '')
     if blog:
-        st.markdown('<span class="ctx-pill">✅ 블로그 글 자동 반영됨</span>', unsafe_allow_html=True)
+        st.markdown('<span class="ctx-pill">✅ 블로그 글이 자동 반영됨</span>', unsafe_allow_html=True)
+        st.caption("방금 만든 블로그 글을 기반으로 변환합니다. (원본 재입력 불필요)")
     else:
-        st.caption("블로그 글을 먼저 만들면 자동 반영돼요. (전자책 분석만으로도 변환 가능)")
+        st.caption("블로그 탭에서 글을 먼저 만들면 자동 반영돼요. (또는 전자책 분석만으로도 변환 가능)")
 
-    st.markdown("**글 콘텐츠**")
-    text_channels = st.multiselect("SNS 채널",
+    # 글 기반 채널
+    st.markdown("#### 글 콘텐츠")
+    text_channels = st.multiselect("SNS 채널 선택",
                                    ["스레드(Threads)", "X(트위터)", "유튜브 쇼츠 대본"],
-                                   default=["스레드(Threads)"], key="sns_text_ch", label_visibility="collapsed")
+                                   default=["스레드(Threads)"], key="sns_text_ch")
     if st.button("글 콘텐츠 변환", key="sns_text_btn", use_container_width=True):
         base = blog if blog else _ctx_block()
         if not base.strip():
@@ -654,9 +562,10 @@ def tab_sns():
     if st.session_state.get('sns_result'):
         copy_block(st.session_state['sns_result'], key="sns_out")
 
+    # 인스타 카드뉴스 (이미지)
     st.markdown("---")
-    st.markdown("**인스타 카드뉴스**")
-    st.caption("고품질 디자인으로 병렬 생성합니다. (Google API 키 필요)")
+    st.markdown("#### 인스타 카드뉴스 (이미지로 생성)")
+    st.caption("실제 인기 카드뉴스 수준의 고품질 디자인으로 생성합니다. (Google API 키 필요)")
 
     card_style = st.selectbox(
         "디자인 스타일",
@@ -670,12 +579,12 @@ def tab_sns():
 
     if st.button("카드뉴스 이미지 생성", key="card_btn", use_container_width=True):
         base = blog if blog else _ctx_block()
-        ok_key, key_msg = validate_gemini_key(st.session_state.get('gemini_key', ''))
         if not base.strip():
             st.warning("블로그 글을 먼저 만들거나 전자책을 분석해주세요.")
-        elif not ok_key:
-            st.warning(key_msg + " (카드뉴스는 Google 키가 필요해요)")
+        elif not st.session_state.get('gemini_key'):
+            st.warning("카드뉴스 이미지 생성에는 사이드바의 Google API 키가 필요해요.")
         else:
+            # 1) 카드별 문구를 Claude로 구성
             with st.spinner("카드 문구 구성 중..."):
                 txt_prompt = f"""아래 글로 인스타 카드뉴스 {n_cards}장의 문구를 만들어라.
 [원본]
@@ -690,6 +599,7 @@ JSON만: {{"cards":[{{"no":1,"title":"큰 글자 문구(10자 내외)","sub":"�
             if not cards or not cards.get('cards'):
                 st.error("카드 문구 생성에 실패했어요.")
             else:
+                # 2) 스타일별 통일 디자인 시스템 (시리즈 일관성)
                 style_system = {
                     "트렌디 그라데이션 (보라·핑크, MZ 감성)":
                         "Design system: vibrant purple-to-pink-to-coral gradient background, "
@@ -706,23 +616,22 @@ JSON만: {{"cards":[{{"no":1,"title":"큰 글자 문구(10자 내외)","sub":"�
                         "huge high-contrast Korean typography, playful bold shapes, punchy energetic social media style, eye-catching.",
                 }[card_style]
 
-                card_list = cards['cards']
-                total = len(card_list)
-                gkey = st.session_state.get('gemini_key', '')
-
-                def build_prompt(idx, card):
+                st.session_state['card_imgs'] = []
+                prog = st.progress(0)
+                total = len(cards['cards'])
+                for idx, card in enumerate(cards['cards']):
                     title = card.get('title', '')
                     sub = card.get('sub', '')
-                    if idx == 0:
-                        role = "COVER card — make it the most eye-catching, largest headline, strongest hook"
-                    elif idx == total - 1:
-                        role = "CLOSING card — include a clear call-to-action button or label"
-                    else:
-                        role = "CONTENT card — one key point, clear hierarchy"
-                    return (
+                    is_cover = (idx == 0)
+                    role = ("COVER card — make it the most eye-catching, largest headline, strongest hook"
+                            if is_cover else
+                            ("CLOSING card — include a clear call-to-action button or label" if idx == total - 1
+                             else "CONTENT card — one key point, clear hierarchy"))
+                    img_prompt = (
                         f"Create a professional Instagram carousel card, 1:1 square, designed by a top social media designer. "
                         f"This is card {idx+1} of {total} in a cohesive series — keep the SAME visual style across the series. "
-                        f"{style_system} This is the {role}. "
+                        f"{style_system} "
+                        f"This is the {role}. "
                         f"Render Korean text PERFECTLY and legibly, with strong typographic hierarchy (big headline, smaller subtext). "
                         f"Headline (대제목): \"{title}\". "
                         + (f"Sub text (보조): \"{sub}\". " if sub else "")
@@ -730,42 +639,20 @@ JSON만: {{"cards":[{{"no":1,"title":"큰 글자 문구(10자 내외)","sub":"�
                         "High visual polish, looks like a real viral Korean Instagram card-news. No watermark, no logo, no extra gibberish text. "
                         "Typography-driven graphic design, NOT a photo."
                     )
-
-                # 병렬 생성 — 순서 보존
-                results = [None] * total
-                prog = st.progress(0.0, text="카드 디자인 생성 중...")
-                done = 0
-                with ThreadPoolExecutor(max_workers=IMG_WORKERS) as ex:
-                    futs = {
-                        ex.submit(_gen_image_core, gkey, build_prompt(i, c), "1:1", "2K"): i
-                        for i, c in enumerate(card_list)
-                    }
-                    for fut in as_completed(futs):
-                        i = futs[fut]
-                        try:
-                            data, err = fut.result()
-                        except Exception as e:
-                            data, err = None, _friendly_error(e)
-                        if data:
-                            results[i] = (card_list[i].get('title', ''), data)
-                        done += 1
-                        prog.progress(done / total, text=f"카드 생성 중... {done}/{total}")
+                    data, err = generate_image(img_prompt, aspect_ratio="1:1", image_size="2K")
+                    if data:
+                        st.session_state['card_imgs'].append((title, data))
+                    prog.progress((idx + 1) / total)
                 prog.empty()
-
-                imgs = [r for r in results if r]
-                st.session_state['card_imgs'] = imgs
-                if imgs:
-                    st.success(f"카드 {len(imgs)}장 생성 완료!" + (f" ({total - len(imgs)}장 실패)" if len(imgs) < total else ""))
+                if st.session_state['card_imgs']:
+                    st.success(f"✅ 카드 {len(st.session_state['card_imgs'])}장 생성 완료!")
                 else:
-                    st.error("이미지 생성에 실패했어요. 잠시 후 다시 시도해주세요.")
+                    st.error("이미지 생성에 실패했어요. (오류 메시지가 위에 떴다면 그 내용을 확인해주세요)")
 
+    # 생성된 카드 표시
     if st.session_state.get('card_imgs'):
-        imgs = st.session_state['card_imgs']
-        st.download_button("전체 카드 ZIP 저장", data=zip_images(imgs),
-                           file_name="cardnews.zip", mime="application/zip",
-                           use_container_width=True, key="card_zip_dl")
         cols = st.columns(2)
-        for i, (title, data) in enumerate(imgs):
+        for i, (title, data) in enumerate(st.session_state['card_imgs']):
             with cols[i % 2]:
                 st.image(data, caption=f"카드 {i+1}: {title[:20]}", use_container_width=True)
                 st.download_button(f"카드 {i+1} 저장", data=data, file_name=f"card_{i+1}.png",
@@ -773,10 +660,10 @@ JSON만: {{"cards":[{{"no":1,"title":"큰 글자 문구(10자 내외)","sub":"�
 
 
 # ==========================================
-# 탭 3 — 크몽 등록 자료
+# 탭 3 — 크몽 서비스 등록 자료 (피드백 8·9·10)
 # ==========================================
 def tab_kmong():
-    section("STEP 04", "크몽 등록 자료")
+    st.markdown("### 🛒 크몽 서비스 등록에 필요한 자료 생성")
     a = ctx_summary()
     if a:
         st.markdown(f'<span class="ctx-pill">📚 {html.escape(a.get("title",""))} 기반</span>', unsafe_allow_html=True)
@@ -806,29 +693,29 @@ def tab_kmong():
     if st.session_state.get('kmong_result'):
         st.markdown("---")
         copy_block(st.session_state['kmong_result'], key="km_out", height=440)
-        st.download_button("자료 저장 (.txt)", data=st.session_state['kmong_result'].encode('utf-8'),
-                           file_name="kmong.txt", mime="text/plain", use_container_width=True, key="km_dl")
-        st.info("상세페이지는 '⑤ 상세페이지' 탭에서 전자책 기반으로 자동 생성돼요.")
+        st.info("💡 상세페이지(디자인 이미지 + 설명 글)는 '⑤ 상세페이지' 탭에서 전자책 기반으로 자동 생성돼요.")
 
 
 # ==========================================
-# 탭 4 — 상세페이지
+# 탭 4 — 상세페이지 (디자인 이미지 + 설득형 2000자, 전자책 자동) 피드백 11
 # ==========================================
 def tab_detail():
-    section("STEP 05", "크몽 상세페이지")
+    st.markdown("### 🎨 크몽 상세페이지")
     a = ctx_summary()
-    if not a:
+    if a:
+        st.markdown(f'<span class="ctx-pill">📚 {html.escape(a.get("title",""))} 기반 · 자동 생성</span>', unsafe_allow_html=True)
+        st.caption("전자책 내용을 토대로, 상단 디자인 이미지 + 9페이지 분량의 설득형 상품 설명을 자동으로 만듭니다.")
+    else:
         st.warning("먼저 ① 탭에서 전자책을 분석해주세요. 상세페이지는 전자책 내용을 토대로 생성돼요.")
         return
-    st.markdown(f'<span class="ctx-pill">📚 {html.escape(a.get("title",""))} 기반 · 자동 생성</span>', unsafe_allow_html=True)
-    st.caption("상단 디자인 이미지 + 9페이지 분량의 설득형 상품 설명을 자동으로 만듭니다.")
 
     col1, col2 = st.columns(2)
     with col1:
-        gen_text = st.button("① 상품 설명 글 (9페이지)", key="detail_text_btn", use_container_width=True)
+        gen_text = st.button("① 상품 설명 글 생성 (9페이지 분량)", key="detail_text_btn", use_container_width=True)
     with col2:
-        gen_img = st.button("② 상단 디자인 이미지", key="detail_img_btn", use_container_width=True)
+        gen_img = st.button("② 상단 디자인 이미지 생성", key="detail_img_btn", use_container_width=True)
 
+    # ① 설득형 상품 설명 — 9페이지(약 9000자) 분량
     if gen_text:
         with st.spinner("설득형 상품 설명 작성 중... 9페이지 분량이라 1~2분 걸려요"):
             prompt = f"""너는 크몽 상세페이지로 전자책을 파는 최고의 세일즈 카피라이터다.
@@ -852,10 +739,10 @@ def tab_detail():
             if r:
                 st.session_state['detail_text'] = r
 
+    # ② 상단 디자인 이미지 — 16:9, 2K, 디자인 디렉팅 강화
     if gen_img:
-        ok_key, key_msg = validate_gemini_key(st.session_state.get('gemini_key', ''))
-        if not ok_key:
-            st.warning(key_msg + " (이미지는 Google 키가 필요해요)")
+        if not st.session_state.get('gemini_key'):
+            st.warning("이미지 생성에는 사이드바의 Google API 키가 필요해요.")
         else:
             with st.spinner("상단 디자인 이미지 생성 중... (2K 고화질)"):
                 title = a.get('title', '전자책')
@@ -876,6 +763,7 @@ def tab_detail():
                 elif err:
                     st.error(err)
 
+    # 결과 표시
     if st.session_state.get('detail_img'):
         st.markdown("---")
         st.markdown("#### 🖼️ 상단 디자인 이미지")
@@ -888,8 +776,7 @@ def tab_detail():
         st.markdown("---")
         st.markdown("#### 📝 상품 설명 글 (9페이지 분량)")
         copy_block(st.session_state['detail_text'], key="detail_text_out", height=460)
-        st.download_button("설명 글 저장 (.txt)", data=st.session_state['detail_text'].encode('utf-8'),
-                           file_name="detail.txt", mime="text/plain", use_container_width=True, key="detail_text_dl")
+        st.caption("위 이미지를 상단에 넣고, 이 글을 본문으로 붙이면 크몽 상세페이지가 완성돼요.")
 
 
 # ==========================================
@@ -909,11 +796,11 @@ def main():
     """, unsafe_allow_html=True)
 
     render_sidebar()
-    if not validate_claude_key(st.session_state.get('api_key', ''))[0]:
+    if not st.session_state.get('api_key'):
         st.warning("👈 사이드바에 Claude API 키를 입력하면 모든 기능이 켜집니다.")
 
     t0, t1, t2, t3, t4 = st.tabs([
-        "① 전자책", "② 블로그", "③ SNS", "④ 크몽", "⑤ 상세페이지"
+        "① 전자책 분석", "② 블로그", "③ SNS 변환", "④ 크몽 등록자료", "⑤ 상세페이지"
     ])
     with t0:
         tab_ebook()
@@ -928,7 +815,7 @@ def main():
 
     st.markdown("""
     <div class="footer">
-        <span style="color:#C9A24B;">CASHMAKER</span> · MarketKit · 제작 남현우
+        <span style="color:#C9A24B;">CASHMAKER</span> · MarketKit | 제작: <span style="color:#fff;">남현우</span>
     </div>
     """, unsafe_allow_html=True)
 
