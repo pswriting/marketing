@@ -187,8 +187,9 @@ def ask_ai(prompt, temperature=0.8, max_tokens=4000):
         return None
 
 
-def generate_image(prompt):
-    """Gemini Nano Banana Pro로 이미지 생성. 성공 시 PNG bytes, 실패 시 (None, 에러)."""
+def generate_image(prompt, aspect_ratio="1:1", image_size="2K"):
+    """Gemini Nano Banana Pro로 이미지 생성. 화면비·해상도 지정.
+    성공 시 (PNG bytes, None), 실패 시 (None, 에러)."""
     gkey = st.session_state.get('gemini_key', '')
     if not gkey:
         return None, "이미지 생성에는 Google(Gemini) API 키가 필요해요. 사이드바에 입력해주세요."
@@ -196,15 +197,32 @@ def generate_image(prompt):
         return None, "google-genai 패키지가 없습니다. requirements.txt 확인 필요."
     try:
         client = google_genai.Client(api_key=gkey)
+        cfg = genai_types.GenerateContentConfig(
+            response_modalities=["Image"],
+            image_config=genai_types.ImageConfig(
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+            ),
+        )
         resp = client.models.generate_content(
             model=IMAGE_MODEL,
             contents=prompt,
+            config=cfg,
         )
         for part in resp.candidates[0].content.parts:
             if getattr(part, 'inline_data', None) and part.inline_data.data:
                 return part.inline_data.data, None
         return None, "이미지가 반환되지 않았어요. 프롬프트를 바꿔 다시 시도해주세요."
     except Exception as e:
+        # image_config 미지원 SDK 대비 폴백
+        try:
+            client = google_genai.Client(api_key=gkey)
+            resp = client.models.generate_content(model=IMAGE_MODEL, contents=prompt)
+            for part in resp.candidates[0].content.parts:
+                if getattr(part, 'inline_data', None) and part.inline_data.data:
+                    return part.inline_data.data, None
+        except Exception as e2:
+            return None, f"이미지 생성 오류: {str(e2)[:140]}"
         return None, f"이미지 생성 오류: {str(e)[:140]}"
 
 
@@ -544,10 +562,19 @@ def tab_sns():
     if st.session_state.get('sns_result'):
         copy_block(st.session_state['sns_result'], key="sns_out")
 
-    # 인스타 카드뉴스 (이미지) — 피드백 7
+    # 인스타 카드뉴스 (이미지)
     st.markdown("---")
     st.markdown("#### 인스타 카드뉴스 (이미지로 생성)")
-    st.caption("카드뉴스는 글이 아니라 실제 이미지로 생성합니다. (Google API 키 필요)")
+    st.caption("실제 인기 카드뉴스 수준의 고품질 디자인으로 생성합니다. (Google API 키 필요)")
+
+    card_style = st.selectbox(
+        "디자인 스타일",
+        ["트렌디 그라데이션 (보라·핑크, MZ 감성)",
+         "프리미엄 다크 (네이비·골드, 고급)",
+         "클린 미니멀 (화이트·블랙, 매거진)",
+         "비비드 팝 (선명한 단색, 강한 대비)"],
+        key="card_style"
+    )
     n_cards = st.slider("카드 장수", 3, 8, 5, key="card_n")
 
     if st.button("카드뉴스 이미지 생성", key="card_btn", use_container_width=True):
@@ -557,31 +584,62 @@ def tab_sns():
         elif not st.session_state.get('gemini_key'):
             st.warning("카드뉴스 이미지 생성에는 사이드바의 Google API 키가 필요해요.")
         else:
-            # 1) 카드별 문구를 Claude로 먼저 뽑고
+            # 1) 카드별 문구를 Claude로 구성
             with st.spinner("카드 문구 구성 중..."):
                 txt_prompt = f"""아래 글로 인스타 카드뉴스 {n_cards}장의 문구를 만들어라.
 [원본]
 {base}
-규칙: 1번 카드=표지(강한 후킹 한 줄), 중간 카드=핵심 한 개씩(짧은 제목+한 줄 설명), 마지막 카드=행동 유도.
-JSON만: {{"cards":[{{"no":1,"title":"큰 글자 문구","sub":"작은 보조 문구(없으면 빈칸)"}}]}}"""
+규칙:
+- 1번 카드=표지(스크롤 멈추는 강한 후킹 한 줄 + 한 줄 보조).
+- 중간 카드=핵심 포인트 한 개씩(짧고 센 제목 + 1~2줄 설명).
+- 마지막 카드=행동 유도(저장/팔로우/링크 클릭 유도).
+- 문구는 짧게. 카드에 글자가 많으면 디자인이 깨진다.
+JSON만: {{"cards":[{{"no":1,"title":"큰 글자 문구(10자 내외)","sub":"보조 문구(20자 내외, 없으면 빈칸)"}}]}}"""
                 cards = parse_json(ask_ai(txt_prompt, 0.8, 2000))
             if not cards or not cards.get('cards'):
                 st.error("카드 문구 생성에 실패했어요.")
             else:
+                # 2) 스타일별 통일 디자인 시스템 (시리즈 일관성)
+                style_system = {
+                    "트렌디 그라데이션 (보라·핑크, MZ 감성)":
+                        "Design system: vibrant purple-to-pink-to-coral gradient background, "
+                        "modern geometric shapes and soft glow accents, bold rounded sans-serif Korean typography, "
+                        "trendy Gen-Z social media aesthetic like top Korean Instagram creators, white text with subtle shadow.",
+                    "프리미엄 다크 (네이비·골드, 고급)":
+                        "Design system: deep navy to near-black background, elegant gold (#C9A24B) accent lines and frames, "
+                        "premium serif+sans Korean typography, luxury self-development brand aesthetic, generous negative space, refined and trustworthy.",
+                    "클린 미니멀 (화이트·블랙, 매거진)":
+                        "Design system: clean off-white background, strong black Korean typography, single accent color, "
+                        "editorial magazine layout, lots of whitespace, minimal geometric divider lines, sophisticated and calm.",
+                    "비비드 팝 (선명한 단색, 강한 대비)":
+                        "Design system: one bold vivid solid color background per card from a cohesive palette, "
+                        "huge high-contrast Korean typography, playful bold shapes, punchy energetic social media style, eye-catching.",
+                }[card_style]
+
                 st.session_state['card_imgs'] = []
                 prog = st.progress(0)
                 total = len(cards['cards'])
                 for idx, card in enumerate(cards['cards']):
                     title = card.get('title', '')
                     sub = card.get('sub', '')
+                    is_cover = (idx == 0)
+                    role = ("COVER card — make it the most eye-catching, largest headline, strongest hook"
+                            if is_cover else
+                            ("CLOSING card — include a clear call-to-action button or label" if idx == total - 1
+                             else "CONTENT card — one key point, clear hierarchy"))
                     img_prompt = (
-                        f"인스타그램 카드뉴스 정사각형(1:1) 이미지 1장. 한국어 텍스트를 또렷하고 정확하게 렌더링할 것. "
-                        f"세련된 미니멀 디자인, 진한 남색~검정 배경에 골드/흰색 텍스트, 큰 제목 중앙 배치. "
-                        f"큰 제목: \"{title}\". "
-                        + (f"작은 보조문구: \"{sub}\". " if sub else "")
-                        + f"카드 {card.get('no', idx+1)}/{total}. 고급스러운 자기계발 콘텐츠 톤. 사진 말고 타이포 중심 그래픽."
+                        f"Create a professional Instagram carousel card, 1:1 square, designed by a top social media designer. "
+                        f"This is card {idx+1} of {total} in a cohesive series — keep the SAME visual style across the series. "
+                        f"{style_system} "
+                        f"This is the {role}. "
+                        f"Render Korean text PERFECTLY and legibly, with strong typographic hierarchy (big headline, smaller subtext). "
+                        f"Headline (대제목): \"{title}\". "
+                        + (f"Sub text (보조): \"{sub}\". " if sub else "")
+                        + "Balanced composition, professional grid alignment, generous margins so text never touches edges. "
+                        "High visual polish, looks like a real viral Korean Instagram card-news. No watermark, no logo, no extra gibberish text. "
+                        "Typography-driven graphic design, NOT a photo."
                     )
-                    data, err = generate_image(img_prompt)
+                    data, err = generate_image(img_prompt, aspect_ratio="1:1", image_size="2K")
                     if data:
                         st.session_state['card_imgs'].append((title, data))
                     prog.progress((idx + 1) / total)
@@ -589,7 +647,7 @@ JSON만: {{"cards":[{{"no":1,"title":"큰 글자 문구","sub":"작은 보조 �
                 if st.session_state['card_imgs']:
                     st.success(f"✅ 카드 {len(st.session_state['card_imgs'])}장 생성 완료!")
                 else:
-                    st.error("이미지 생성에 실패했어요. Google API 키와 잔액을 확인해주세요.")
+                    st.error("이미지 생성에 실패했어요. (오류 메시지가 위에 떴다면 그 내용을 확인해주세요)")
 
     # 생성된 카드 표시
     if st.session_state.get('card_imgs'):
@@ -646,53 +704,60 @@ def tab_detail():
     a = ctx_summary()
     if a:
         st.markdown(f'<span class="ctx-pill">📚 {html.escape(a.get("title",""))} 기반 · 자동 생성</span>', unsafe_allow_html=True)
-        st.caption("전자책 내용을 토대로, 상단 디자인 이미지 + 설득형 상품설명 2000자를 자동으로 만듭니다.")
+        st.caption("전자책 내용을 토대로, 상단 디자인 이미지 + 9페이지 분량의 설득형 상품 설명을 자동으로 만듭니다.")
     else:
         st.warning("먼저 ① 탭에서 전자책을 분석해주세요. 상세페이지는 전자책 내용을 토대로 생성돼요.")
         return
 
     col1, col2 = st.columns(2)
     with col1:
-        gen_text = st.button("① 상품 설명 글 생성 (2000자)", key="detail_text_btn", use_container_width=True)
+        gen_text = st.button("① 상품 설명 글 생성 (9페이지 분량)", key="detail_text_btn", use_container_width=True)
     with col2:
         gen_img = st.button("② 상단 디자인 이미지 생성", key="detail_img_btn", use_container_width=True)
 
-    # ① 설득형 상품 설명 2000자
+    # ① 설득형 상품 설명 — 9페이지(약 9000자) 분량
     if gen_text:
-        with st.spinner("설득형 상품 설명 작성 중... (2000자)"):
+        with st.spinner("설득형 상품 설명 작성 중... 9페이지 분량이라 1~2분 걸려요"):
             prompt = f"""너는 크몽 상세페이지로 전자책을 파는 최고의 세일즈 카피라이터다.
-아래 전자책을 토대로 '상품 설명 글'을 2000자 내외로 써라. (디자인 말고 순수 텍스트)
+아래 전자책을 토대로 '상품 설명 글'을 9페이지 분량(약 8000~9000자)으로 길고 설득력 있게 써라. (디자인 말고 순수 텍스트)
 {_ctx_block()}
 {STYLE_CORE}
-[상세페이지 설득 구조 — 몰입감 있게]
-1. 후킹: 타겟 독자의 현재 고통을 정면으로. "이러고 있지 않나요?"
-2. 공감과 통념 부수기: 왜 지금까지 안 됐는지, 그건 당신 탓이 아니라고.
-3. 그래서 이 전자책이 답인 이유: 무엇이 어떻게 다른지 구체적으로.
-4. 구체적 혜택·결과: 이 책을 읽으면 무엇이 달라지는지 장면과 숫자로.
-5. 누구에게 필요한가 / 누구에겐 필요 없는가.
-6. 구매 후 변화: 읽고 난 뒤의 모습.
-7. 마지막 한 방: 지금 결제해야 하는 이유.
-설명 없이 상품 설명 글만 출력. 소제목으로 구분하되 딱딱하지 않게."""
-            r = ask_ai(prompt, 0.85, 4000)
+[상세페이지 9개 섹션 — 각 섹션을 충분히 길고 깊게. 섹션마다 ■ 소제목으로 구분]
+1. 후킹 (1페이지): 타겟 독자의 현재 고통을 정면으로. "이러고 있지 않나요?" 장면을 생생하게.
+2. 깊은 공감 (1페이지): 그 고통이 어떤 일상인지 구체적 장면으로. 독자가 "내 얘기다" 하게.
+3. 통념 부수기 (1페이지): 왜 지금까지 안 됐는지. 그건 당신 탓이 아니라고. 흔한 방법들이 왜 틀렸는지.
+4. 해답 제시 (1페이지): 그래서 이 전자책이 답인 이유. 무엇이 어떻게 다른지 구체적으로.
+5. 내용 미리보기 (1페이지): 이 책에 무엇이 담겼는지. 목차/핵심 포인트를 매력적으로 소개.
+6. 구체적 혜택·결과 (1페이지): 이 책을 읽으면 무엇이 달라지는지 장면과 숫자로.
+7. 대상 독자 (1페이지): 누구에게 꼭 필요한가 / 누구에겐 필요 없는가. 체크리스트 형태로.
+8. 신뢰·후기 톤 (1페이지): 구매 후 변화, 적용 사례 느낌, 자주 묻는 질문(Q&A) 몇 개.
+9. 마지막 클로징 (1페이지): 지금 결제해야 하는 이유. 강한 행동 유도로 마무리.
+
+[중요] 분량을 충분히 채워라. 각 섹션이 너무 짧으면 안 된다. 전체 8000자 이상.
+설명 없이 상품 설명 글만 출력. 소제목(■)으로 9개 섹션을 명확히 구분하되 딱딱하지 않게."""
+            r = ask_ai(prompt, 0.85, 8000)
             if r:
                 st.session_state['detail_text'] = r
 
-    # ② 상단 디자인 이미지 (썸네일/헤드)
+    # ② 상단 디자인 이미지 — 16:9, 2K, 디자인 디렉팅 강화
     if gen_img:
         if not st.session_state.get('gemini_key'):
             st.warning("이미지 생성에는 사이드바의 Google API 키가 필요해요.")
         else:
-            with st.spinner("상단 디자인 이미지 생성 중..."):
+            with st.spinner("상단 디자인 이미지 생성 중... (2K 고화질)"):
                 title = a.get('title', '전자책')
                 msg = a.get('core_message', '')
                 img_prompt = (
-                    f"크몽 디지털 상품 상세페이지 상단 헤드 배너 이미지. 가로형(16:9). "
-                    f"한국어 텍스트를 또렷하고 정확하게 렌더링. 프리미엄 자기계발 전자책 느낌. "
-                    f"진한 네이비~블랙 배경에 골드와 흰색 타이포, 고급스럽고 신뢰감 있는 디자인. "
-                    f"큰 제목: \"{title}\". 보조 문구: \"{msg}\". "
-                    f"사진 말고 타이포·도형 중심의 세련된 그래픽 디자인. 와디즈 펀딩 메인 배너 톤."
+                    "Create a premium hero banner for a Korean digital product detail page (크몽 상세페이지 상단 배너), "
+                    "designed by a top commercial designer. Landscape 16:9. "
+                    "Deep navy-to-black background with elegant gold (#C9A24B) accents, refined light rays or subtle geometric texture, "
+                    "luxury self-development brand aesthetic, the polish of a Wadiz crowdfunding main banner. "
+                    "Render Korean text PERFECTLY and legibly with strong typographic hierarchy. "
+                    f"Large main headline: \"{title}\". Supporting subheadline: \"{msg}\". "
+                    "Generous margins, balanced cinematic composition, high contrast, trustworthy and high-end. "
+                    "Typography and shape driven graphic design, NOT a photo. No watermark, no logo, no random gibberish text."
                 )
-                data, err = generate_image(img_prompt)
+                data, err = generate_image(img_prompt, aspect_ratio="16:9", image_size="2K")
                 if data:
                     st.session_state['detail_img'] = data
                 elif err:
@@ -709,7 +774,7 @@ def tab_detail():
 
     if st.session_state.get('detail_text'):
         st.markdown("---")
-        st.markdown("#### 📝 상품 설명 글 (2000자)")
+        st.markdown("#### 📝 상품 설명 글 (9페이지 분량)")
         copy_block(st.session_state['detail_text'], key="detail_text_out", height=460)
         st.caption("위 이미지를 상단에 넣고, 이 글을 본문으로 붙이면 크몽 상세페이지가 완성돼요.")
 
