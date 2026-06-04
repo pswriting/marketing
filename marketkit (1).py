@@ -5,7 +5,7 @@ CashMaker 브랜드 / Writey 자매 제품
 
 흐름:
   0. 전자책 업로드 → 내용 자동 분석
-  1. 블로그 주제 추천(클릭 시 본문 칸 자동입력) → 본문 생성 (자청식 몰입형)
+  1. 블로그 주제 추천(클릭 시 본문 칸 자동입력) → 본문 생성 (몰입형)
   2. SNS 변환 (블로그 결과 자동 반영, 카드뉴스는 이미지로 생성)
   3. 크몽 서비스 등록 자료 (제목 25자·가격 추천 포함)
   4. 상세페이지 = 디자인된 이미지 + 설득형 상품설명 2000자 (전자책 기반 자동)
@@ -114,6 +114,30 @@ p,span,label,div,li { color:var(--text); font-size:16px; line-height:1.7; }
 .stTextInput input:focus, .stTextArea textarea:focus {
     border-color:var(--teal) !important; box-shadow:0 0 0 2px rgba(75,183,168,.2) !important;
 }
+
+/* 셀렉트박스 — 흰 배경 + 검은 글씨 */
+.stSelectbox div[data-baseweb="select"] > div {
+    background:#fff !important; border:.5px solid var(--line) !important; border-radius:10px !important;
+}
+.stSelectbox div[data-baseweb="select"] span,
+.stSelectbox div[data-baseweb="select"] div {
+    color:#111 !important; -webkit-text-fill-color:#111 !important;
+}
+/* 드롭다운 펼침 목록 */
+div[data-baseweb="popover"] li, ul[role="listbox"] li {
+    color:#111 !important; -webkit-text-fill-color:#111 !important; background:#fff !important;
+}
+/* 멀티셀렉트 선택 태그 — 골드 배경 + 검은 글씨 */
+.stMultiSelect div[data-baseweb="select"] > div {
+    background:#fff !important; border:.5px solid var(--line) !important; border-radius:10px !important;
+}
+.stMultiSelect span[data-baseweb="tag"] {
+    background:#C9A24B !important;
+}
+.stMultiSelect span[data-baseweb="tag"] span {
+    color:#0B0B0D !important; -webkit-text-fill-color:#0B0B0D !important;
+}
+.stMultiSelect div[data-baseweb="select"] input { color:#111 !important; -webkit-text-fill-color:#111 !important; }
 
 .stTabs [data-baseweb="tab-list"] { gap:4px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
 .stTabs [data-baseweb="tab"] { background:transparent; color:var(--text2) !important; border-radius:10px 10px 0 0; padding:11px 18px; font-weight:600; }
@@ -246,7 +270,7 @@ def _ctx_block():
 
 
 # ==========================================
-# 자청식 몰입형 글쓰기 가이드 (강화)
+# 몰입형 글쓰기 가이드 (강화)
 # ==========================================
 STYLE_CORE = """
 [★ 절대 원칙 — 설명문이 아니라 '몰입형 글'을 써라]
@@ -437,13 +461,14 @@ JSON만 출력:
         for i, t in enumerate(topics):
             label = f"[{t.get('intent','')}] {t.get('title','')}"
             if st.button(label, key=f"pick_topic_{i}", use_container_width=True):
-                st.session_state['picked_topic'] = t.get('title', '')
+                # 위젯 key 자체를 세팅해야 text_input에 즉시 반영된다
+                st.session_state['blog_topic'] = t.get('title', '')
                 st.rerun()
             st.markdown(f'<div style="font-size:13px;color:#908D86;margin:-6px 0 10px 4px;">└ {html.escape(t.get("why",""))}</div>', unsafe_allow_html=True)
 
     st.markdown("#### 2단계 · 본문 생성")
-    topic = st.text_input("글 주제 (위에서 클릭하면 자동 입력 / 직접 입력도 가능)",
-                          value=st.session_state.get('picked_topic', ''), key="blog_topic")
+    # value를 주지 않고 key만 사용 — 버튼이 session_state['blog_topic']를 채우면 그대로 표시됨
+    topic = st.text_input("글 주제 (위에서 클릭하면 자동 입력 / 직접 입력도 가능)", key="blog_topic")
     length = st.selectbox("글 길이", ["표준 (1500자)", "롱폼 (2500자)", "숏폼 (800자)"], key="blog_len")
 
     if st.button("블로그 본문 생성", key="blog_btn", use_container_width=True):
@@ -451,8 +476,8 @@ JSON만 출력:
             st.warning("주제를 입력하거나 위에서 클릭해주세요.")
         else:
             lmap = {"표준 (1500자)": "1500자 내외", "롱폼 (2500자)": "2500자 내외", "숏폼 (800자)": "800자 내외"}
-            with st.spinner("자청식 몰입형 글 작성 중... (30초~1분)"):
-                prompt = f"""너는 자청처럼 쓰는 블로그 작가다. 독자가 스크롤을 멈추고 끝까지 빨려드는 글을 쓴다.
+            with st.spinner("몰입형 글 작성 중... (30초~1분)"):
+                prompt = f"""너는 독자가 스크롤을 멈추고 끝까지 빨려드는 글을 쓰는 블로그 작가다.
 [주제]: {topic}
 [목표 길이]: {lmap[length]}
 {_ctx_block()}
@@ -487,9 +512,9 @@ def tab_sns():
     else:
         st.caption("블로그 탭에서 글을 먼저 만들면 자동 반영돼요. (또는 전자책 분석만으로도 변환 가능)")
 
-    # 글 기반 채널 (텍스트)
+    # 글 기반 채널
     st.markdown("#### 글 콘텐츠")
-    text_channels = st.multiselect("텍스트 채널",
+    text_channels = st.multiselect("SNS 채널 선택",
                                    ["스레드(Threads)", "X(트위터)", "유튜브 쇼츠 대본"],
                                    default=["스레드(Threads)"], key="sns_text_ch")
     if st.button("글 콘텐츠 변환", key="sns_text_btn", use_container_width=True):
@@ -639,7 +664,7 @@ def tab_detail():
 아래 전자책을 토대로 '상품 설명 글'을 2000자 내외로 써라. (디자인 말고 순수 텍스트)
 {_ctx_block()}
 {STYLE_CORE}
-[상세페이지 설득 구조 — 자청/와디즈 톤으로 몰입감 있게]
+[상세페이지 설득 구조 — 몰입감 있게]
 1. 후킹: 타겟 독자의 현재 고통을 정면으로. "이러고 있지 않나요?"
 2. 공감과 통념 부수기: 왜 지금까지 안 됐는지, 그건 당신 탓이 아니라고.
 3. 그래서 이 전자책이 답인 이유: 무엇이 어떻게 다른지 구체적으로.
